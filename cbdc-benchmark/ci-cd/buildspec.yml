@@ -1,0 +1,84 @@
+version: 0.2
+
+# AWS CodeBuild Buildspec
+# Triggered on git push — runs full benchmark pipeline
+
+env:
+  variables:
+    PROJECT_NAME: "cbdc-benchmark"
+    TARGET_TPS: "50"
+    DURATION: "300"
+  parameter-store:
+    AWS_REGION: "/cbdc-benchmark/region"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.11
+    commands:
+      - echo "Installing dependencies..."
+      - pip install boto3 web3 pandas openpyxl matplotlib seaborn numpy eth-account requests tqdm
+      - yum install -y docker jq 2>/dev/null || apt-get install -y docker.io jq 2>/dev/null || true
+      - curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+      - chmod +x /usr/local/bin/docker-compose
+
+  pre_build:
+    commands:
+      - echo "Auto-detecting AWS environment..."
+      - export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - export BUCKET_NAME="${PROJECT_NAME}-${AWS_ACCOUNT_ID}-${AWS_DEFAULT_REGION}"
+      - export RUN_ID="codebuild-$(date +%Y%m%d-%H%M%S)"
+      - echo "Run ID: $RUN_ID"
+      - echo "Bucket: $BUCKET_NAME"
+
+      # Upload dataset if present
+      - |
+        if [ -f "dataset/FinalDataset.xlsx" ]; then
+          aws s3 cp dataset/FinalDataset.xlsx s3://${BUCKET_NAME}/dataset/FinalDataset.xlsx
+          echo "Dataset uploaded"
+        fi
+
+  build:
+    commands:
+      - echo "Deploying infrastructure..."
+      - chmod +x scripts/deploy.sh
+      - |
+        # Check if stack exists
+        STACK_STATUS=$(aws cloudformation describe-stacks \
+          --stack-name $PROJECT_NAME \
+          --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+        if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ]; then
+          aws cloudformation create-stack \
+            --stack-name $PROJECT_NAME \
+            --template-body file://infrastructure/cloudformation.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameters ParameterKey=ProjectName,ParameterValue=$PROJECT_NAME
+          aws cloudformation wait stack-create-complete --stack-name $PROJECT_NAME
+        fi
+
+      - echo "Running benchmarks..."
+      - chmod +x scripts/run-benchmark.sh
+      - ./scripts/run-benchmark.sh --run-id $RUN_ID --consensus both --tps $TARGET_TPS --duration $DURATION
+
+  post_build:
+    commands:
+      - echo "Generating reports..."
+      - |
+        python3 benchmark/report-generator.py \
+          --bucket $BUCKET_NAME \
+          --run-id $RUN_ID \
+          --region $AWS_DEFAULT_REGION
+
+      - echo "Build complete. Run ID: $RUN_ID"
+      - echo "Results: s3://${BUCKET_NAME}/results/${RUN_ID}/"
+
+artifacts:
+  files:
+    - "**/*"
+  base-directory: "."
+
+reports:
+  BenchmarkResults:
+    files:
+      - "results/**/*.json"
+    file-format: "JUNITXML"

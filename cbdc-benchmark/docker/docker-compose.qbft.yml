@@ -1,0 +1,137 @@
+version: "3.8"
+
+x-besu-base: &besu-base
+  image: hyperledger/besu:latest
+  restart: unless-stopped
+  networks:
+    - besu-net
+  logging:
+    driver: awslogs
+    options:
+      awslogs-group: "/cbdc-benchmark/cbdc-benchmark"
+      awslogs-region: "${AWS_REGION}"
+      awslogs-stream-prefix: "qbft"
+
+services:
+  besu-node1:
+    <<: *besu-base
+    container_name: qbft-node1
+    volumes:
+      - ./besu/qbft-config/genesis.json:/config/genesis.json:ro
+      - qnode1-data:/data
+    ports:
+      - "8545:8545"
+      - "8546:8546"
+      - "30303:30303"
+    command:
+      - --genesis-file=/config/genesis.json
+      - --data-path=/data
+      - --node-private-key-file=/data/key
+      - --rpc-http-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-cors-origins=*
+      - --rpc-http-api=ETH,NET,QBFT,ADMIN,WEB3,TXPOOL
+      - --rpc-ws-enabled=true
+      - --rpc-ws-host=0.0.0.0
+      - --rpc-ws-port=8546
+      - --p2p-port=30303
+      - --p2p-host=0.0.0.0
+      - --logging=INFO
+      - --min-gas-price=0
+      - --metrics-enabled=true
+      - --metrics-host=0.0.0.0
+      - --metrics-port=9545
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8545"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  besu-node2:
+    <<: *besu-base
+    container_name: qbft-node2
+    volumes:
+      - ./besu/qbft-config/genesis.json:/config/genesis.json:ro
+      - qnode2-data:/data
+    ports:
+      - "8547:8545"
+      - "30304:30303"
+    command:
+      - --genesis-file=/config/genesis.json
+      - --data-path=/data
+      - --node-private-key-file=/data/key
+      - --rpc-http-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,QBFT,ADMIN,WEB3,TXPOOL
+      - --p2p-port=30303
+      - --bootnodes=enode://${NODE1_PUBKEY}@besu-node1:30303
+      - --logging=INFO
+      - --min-gas-price=0
+    depends_on:
+      besu-node1:
+        condition: service_healthy
+
+  besu-node3:
+    <<: *besu-base
+    container_name: qbft-node3
+    volumes:
+      - ./besu/qbft-config/genesis.json:/config/genesis.json:ro
+      - qnode3-data:/data
+    ports:
+      - "8548:8545"
+      - "30305:30303"
+    command:
+      - --genesis-file=/config/genesis.json
+      - --data-path=/data
+      - --node-private-key-file=/data/key
+      - --rpc-http-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,QBFT,ADMIN,WEB3,TXPOOL
+      - --p2p-port=30303
+      - --bootnodes=enode://${NODE1_PUBKEY}@besu-node1:30303
+      - --logging=INFO
+      - --min-gas-price=0
+    depends_on:
+      besu-node1:
+        condition: service_healthy
+
+  besu-node4:
+    <<: *besu-base
+    container_name: qbft-node4
+    volumes:
+      - ./besu/qbft-config/genesis.json:/config/genesis.json:ro
+      - qnode4-data:/data
+    ports:
+      - "8549:8545"
+      - "30306:30303"
+    command:
+      - --genesis-file=/config/genesis.json
+      - --data-path=/data
+      - --node-private-key-file=/data/key
+      - --rpc-http-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,QBFT,ADMIN,WEB3,TXPOOL
+      - --p2p-port=30303
+      - --bootnodes=enode://${NODE1_PUBKEY}@besu-node1:30303
+      - --logging=INFO
+      - --min-gas-price=0
+    depends_on:
+      besu-node1:
+        condition: service_healthy
+
+networks:
+  besu-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24
+
+volumes:
+  qnode1-data:
+  qnode2-data:
+  qnode3-data:
+  qnode4-data:

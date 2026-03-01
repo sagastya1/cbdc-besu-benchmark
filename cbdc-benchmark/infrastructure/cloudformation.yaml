@@ -1,0 +1,411 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CBDC Benchmark Infrastructure - Hyperledger Besu PoA vs QBFT
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cbdc-benchmark
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.medium, t3.large, t3.xlarge, m5.large]
+  KeyName:
+    Type: String
+    Default: ""
+  DatasetS3Key:
+    Type: String
+    Default: dataset/FinalDataset.xlsx
+  BenchmarkDuration:
+    Type: Number
+    Default: 300
+    Description: Duration in seconds per consensus test
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, ""]]
+
+Resources:
+  # ─── S3 BUCKETS ───────────────────────────────────────────────────────────
+  BenchmarkBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ─── VPC & NETWORKING ─────────────────────────────────────────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-2"
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTable
+
+  SubnetRouteAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTable
+
+  # ─── SECURITY GROUPS ──────────────────────────────────────────────────────
+  BesuSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Besu validator node SG
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8545
+          ToPort: 8545
+          CidrIp: 10.0.0.0/16
+          Description: JSON-RPC HTTP
+        - IpProtocol: tcp
+          FromPort: 8546
+          ToPort: 8546
+          CidrIp: 10.0.0.0/16
+          Description: JSON-RPC WebSocket
+        - IpProtocol: tcp
+          FromPort: 30303
+          ToPort: 30303
+          CidrIp: 10.0.0.0/16
+          Description: P2P
+        - IpProtocol: udp
+          FromPort: 30303
+          ToPort: 30303
+          CidrIp: 10.0.0.0/16
+          Description: P2P UDP
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  BenchmarkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Benchmark client SG
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # ─── IAM ROLES ────────────────────────────────────────────────────────────
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: S3BenchmarkAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt BenchmarkBucket.Arn
+                  - !Sub "${BenchmarkBucket.Arn}/*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # ─── EC2 LAUNCH TEMPLATE ──────────────────────────────────────────────────
+  BesuLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ProjectName}-besu-lt"
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref BesuSecurityGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -e
+            yum update -y
+            yum install -y docker aws-cli jq
+            systemctl enable docker
+            systemctl start docker
+            usermod -aG docker ec2-user
+            # Install docker-compose
+            curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
+              -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+            # Signal ready
+            echo "BESU_NODE_READY" > /tmp/node_ready
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${ProjectName}-besu-node"
+              - Key: Project
+                Value: !Ref ProjectName
+
+  # ─── VALIDATOR NODES (4 nodes) ────────────────────────────────────────────
+  BesuNode1:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BesuLaunchTemplate
+        Version: !GetAtt BesuLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-validator-1"
+        - Key: NodeIndex
+          Value: "1"
+
+  BesuNode2:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BesuLaunchTemplate
+        Version: !GetAtt BesuLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-validator-2"
+        - Key: NodeIndex
+          Value: "2"
+
+  BesuNode3:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BesuLaunchTemplate
+        Version: !GetAtt BesuLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-validator-3"
+        - Key: NodeIndex
+          Value: "3"
+
+  BesuNode4:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BesuLaunchTemplate
+        Version: !GetAtt BesuLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-validator-4"
+        - Key: NodeIndex
+          Value: "4"
+
+  # ─── BENCHMARK CLIENT ─────────────────────────────────────────────────────
+  BenchmarkInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BesuLaunchTemplate
+        Version: !GetAtt BesuLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref BenchmarkSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-benchmark-client"
+        - Key: Role
+          Value: benchmark
+
+  # ─── CLOUDWATCH LOG GROUP ─────────────────────────────────────────────────
+  BenchmarkLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/cbdc-benchmark/${ProjectName}"
+      RetentionInDays: 7
+
+  # ─── CLOUDWATCH DASHBOARD ─────────────────────────────────────────────────
+  BenchmarkDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ProjectName}-performance"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "title": "TPS Comparison: PoA vs QBFT",
+                "metrics": [
+                  ["CBDCBenchmark", "TPS", "Consensus", "PoA"],
+                  ["CBDCBenchmark", "TPS", "Consensus", "QBFT"]
+                ],
+                "period": 10,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "Avg Latency (ms)",
+                "metrics": [
+                  ["CBDCBenchmark", "AvgLatencyMs", "Consensus", "PoA"],
+                  ["CBDCBenchmark", "AvgLatencyMs", "Consensus", "QBFT"]
+                ],
+                "period": 10,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "P95 Latency (ms)",
+                "metrics": [
+                  ["CBDCBenchmark", "P95LatencyMs", "Consensus", "PoA"],
+                  ["CBDCBenchmark", "P95LatencyMs", "Consensus", "QBFT"]
+                ],
+                "period": 10,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "title": "Success Rate (%)",
+                "metrics": [
+                  ["CBDCBenchmark", "SuccessRate", "Consensus", "PoA"],
+                  ["CBDCBenchmark", "SuccessRate", "Consensus", "QBFT"]
+                ],
+                "period": 10,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  BucketName:
+    Value: !Ref BenchmarkBucket
+    Export:
+      Name: !Sub "${ProjectName}-bucket"
+
+  Node1IP:
+    Value: !GetAtt BesuNode1.PrivateIp
+    Export:
+      Name: !Sub "${ProjectName}-node1-ip"
+
+  Node2IP:
+    Value: !GetAtt BesuNode2.PrivateIp
+    Export:
+      Name: !Sub "${ProjectName}-node2-ip"
+
+  Node3IP:
+    Value: !GetAtt BesuNode3.PrivateIp
+    Export:
+      Name: !Sub "${ProjectName}-node3-ip"
+
+  Node4IP:
+    Value: !GetAtt BesuNode4.PrivateIp
+    Export:
+      Name: !Sub "${ProjectName}-node4-ip"
+
+  BenchmarkInstanceId:
+    Value: !Ref BenchmarkInstance
+    Export:
+      Name: !Sub "${ProjectName}-benchmark-id"
+
+  VpcId:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${ProjectName}-vpc-id"
+
+  DashboardURL:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-performance"
