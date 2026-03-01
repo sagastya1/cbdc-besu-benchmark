@@ -1,0 +1,129 @@
+name: CBDC Benchmark Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      consensus:
+        description: 'Which consensus to test'
+        required: true
+        default: 'both'
+        type: choice
+        options: [both, poa, qbft]
+      target_tps:
+        description: 'Target TPS'
+        required: false
+        default: '50'
+      duration:
+        description: 'Duration (seconds)'
+        required: false
+        default: '300'
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+  PROJECT_NAME: cbdc-benchmark
+
+jobs:
+  deploy-and-benchmark:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: |
+          pip install boto3 web3 pandas openpyxl matplotlib seaborn numpy eth-account requests tqdm
+
+      - name: Set Run ID
+        run: echo "RUN_ID=gh-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_ENV
+
+      - name: Get AWS Account ID
+        run: |
+          echo "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_ENV
+
+      - name: Set Bucket Name
+        run: |
+          echo "BUCKET_NAME=${PROJECT_NAME}-${AWS_ACCOUNT_ID}-${AWS_REGION}" >> $GITHUB_ENV
+
+      - name: Deploy Infrastructure
+        run: |
+          STACK_STATUS=$(aws cloudformation describe-stacks \
+            --stack-name $PROJECT_NAME \
+            --query "Stacks[0].StackStatus" --output text 2>/dev/null || echo "DOES_NOT_EXIST")
+          
+          if [ "$STACK_STATUS" = "DOES_NOT_EXIST" ] || [ "$STACK_STATUS" = "DELETE_COMPLETE" ]; then
+            aws cloudformation create-stack \
+              --stack-name $PROJECT_NAME \
+              --template-body file://infrastructure/cloudformation.yaml \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --parameters ParameterKey=ProjectName,ParameterValue=$PROJECT_NAME
+            aws cloudformation wait stack-create-complete --stack-name $PROJECT_NAME
+          else
+            echo "Stack exists: $STACK_STATUS"
+          fi
+
+      - name: Upload Dataset
+        run: |
+          if [ -f "dataset/FinalDataset.xlsx" ]; then
+            aws s3 cp dataset/FinalDataset.xlsx s3://${BUCKET_NAME}/dataset/FinalDataset.xlsx
+          else
+            echo "No dataset found locally — assuming already in S3"
+          fi
+
+      - name: Run Benchmark
+        run: |
+          chmod +x scripts/run-benchmark.sh
+          ./scripts/run-benchmark.sh \
+            --run-id ${{ env.RUN_ID }} \
+            --consensus ${{ github.event.inputs.consensus || 'both' }} \
+            --tps ${{ github.event.inputs.target_tps || '50' }} \
+            --duration ${{ github.event.inputs.duration || '300' }}
+
+      - name: Generate Reports
+        run: |
+          python3 benchmark/report-generator.py \
+            --bucket ${{ env.BUCKET_NAME }} \
+            --run-id ${{ env.RUN_ID }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Download Results
+        run: |
+          mkdir -p artifacts
+          aws s3 sync s3://${BUCKET_NAME}/results/${{ env.RUN_ID }}/reports/ artifacts/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ env.RUN_ID }}
+          path: artifacts/
+          retention-days: 30
+
+      - name: Post Summary
+        run: |
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "**Run ID:** ${{ env.RUN_ID }}" >> $GITHUB_STEP_SUMMARY
+          echo "**S3 Path:** s3://${BUCKET_NAME}/results/${{ env.RUN_ID }}/" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f artifacts/comparison_report.json ]; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat artifacts/comparison_report.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi

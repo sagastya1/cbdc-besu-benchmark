@@ -1,0 +1,236 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CBDC Benchmark Infrastructure - Hyperledger Besu PoA vs QBFT
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cbdc-benchmark
+  InstanceType:
+    Type: String
+    Default: t3.medium
+
+Resources:
+
+  BenchmarkBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-2"
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTable
+
+  SubnetRouteAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTable
+
+  BesuSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Besu nodes - allow RPC and P2P within VPC plus SSH
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8545
+          ToPort: 8549
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          FromPort: 30303
+          ToPort: 30310
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: udp
+          FromPort: 30303
+          ToPort: 30310
+          CidrIp: 10.0.0.0/16
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-sg"
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !GetAtt BenchmarkBucket.Arn
+                  - !Sub "${BenchmarkBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${ProjectName}-ec2-profile"
+      Roles:
+        - !Ref EC2InstanceRole
+
+  BesuLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ProjectName}-lt"
+      LaunchTemplateData:
+        ImageId: "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref BesuSecurityGroup
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            set -e
+            yum update -y
+            yum install -y docker python3-pip git jq
+            systemctl enable docker
+            systemctl start docker
+            usermod -aG docker ec2-user
+            pip3 install boto3 web3 pandas openpyxl matplotlib seaborn numpy eth-account requests tqdm
+            curl -sL "https://github.com/docker/compose/releases/latest/download/docker-compose-Linux-x86_64" -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+            mkdir -p /opt/cbdc-benchmark
+            echo 'INSTANCE_READY' > /tmp/ready
+
+  BenchmarkInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BesuLaunchTemplate
+        Version: !GetAtt BesuLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-benchmark"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  BenchmarkLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/cbdc-benchmark/${ProjectName}"
+      RetentionInDays: 7
+
+Outputs:
+  BucketName:
+    Value: !Ref BenchmarkBucket
+    Export:
+      Name: !Sub "${ProjectName}-bucket"
+
+  BenchmarkInstanceId:
+    Value: !Ref BenchmarkInstance
+    Export:
+      Name: !Sub "${ProjectName}-benchmark-id"
+
+  BenchmarkInstanceIP:
+    Value: !GetAtt BenchmarkInstance.PublicIp
+    Export:
+      Name: !Sub "${ProjectName}-benchmark-ip"
+
+  VpcId:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${ProjectName}-vpc-id"

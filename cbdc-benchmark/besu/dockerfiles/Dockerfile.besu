@@ -1,0 +1,12 @@
+FROM hyperledger/besu:latest
+
+# Copy genesis and config
+COPY genesis.json /config/genesis.json
+COPY besu-config.toml /config/besu-config.toml
+
+# Data directory
+RUN mkdir -p /data
+
+EXPOSE 8545 8546 30303
+
+ENTRYPOINT ["besu", "--config-file=/config/besu-config.toml"]

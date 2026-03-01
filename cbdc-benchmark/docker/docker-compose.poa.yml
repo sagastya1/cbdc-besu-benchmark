@@ -1,0 +1,148 @@
+version: "3.8"
+
+x-besu-base: &besu-base
+  image: hyperledger/besu:latest
+  restart: unless-stopped
+  networks:
+    - besu-net
+  logging:
+    driver: awslogs
+    options:
+      awslogs-group: "/cbdc-benchmark/cbdc-benchmark"
+      awslogs-region: "${AWS_REGION}"
+      awslogs-stream-prefix: "poa"
+
+services:
+  # ─── BOOTNODE / VALIDATOR 1 ───────────────────────────────────────────────
+  besu-node1:
+    <<: *besu-base
+    container_name: poa-node1
+    volumes:
+      - ./besu/poa-config/genesis.json:/config/genesis.json:ro
+      - node1-data:/data
+    environment:
+      - BESU_NODE_INDEX=1
+    ports:
+      - "8545:8545"
+      - "8546:8546"
+      - "30303:30303"
+    command:
+      - --genesis-file=/config/genesis.json
+      - --data-path=/data
+      - --node-private-key-file=/data/key
+      - --rpc-http-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-cors-origins=*
+      - --rpc-http-api=ETH,NET,CLIQUE,MINER,ADMIN,WEB3,TXPOOL
+      - --rpc-ws-enabled=true
+      - --rpc-ws-host=0.0.0.0
+      - --rpc-ws-port=8546
+      - --p2p-port=30303
+      - --p2p-host=0.0.0.0
+      - --logging=INFO
+      - --min-gas-price=0
+      - --miner-enabled=true
+      - --miner-coinbase=0xfe3b557e8fb62b89f4916b721be55ceb828dbd73
+      - --metrics-enabled=true
+      - --metrics-host=0.0.0.0
+      - --metrics-port=9545
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8545"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  besu-node2:
+    <<: *besu-base
+    container_name: poa-node2
+    volumes:
+      - ./besu/poa-config/genesis.json:/config/genesis.json:ro
+      - node2-data:/data
+    ports:
+      - "8547:8545"
+      - "30304:30303"
+    command:
+      - --genesis-file=/config/genesis.json
+      - --data-path=/data
+      - --node-private-key-file=/data/key
+      - --rpc-http-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,CLIQUE,MINER,ADMIN,WEB3,TXPOOL
+      - --p2p-port=30303
+      - --bootnodes=enode://${NODE1_PUBKEY}@besu-node1:30303
+      - --logging=INFO
+      - --min-gas-price=0
+      - --miner-enabled=true
+      - --miner-coinbase=0x627306090abaB3A6e1400e9345bC60c78a8BEf57
+    depends_on:
+      besu-node1:
+        condition: service_healthy
+
+  besu-node3:
+    <<: *besu-base
+    container_name: poa-node3
+    volumes:
+      - ./besu/poa-config/genesis.json:/config/genesis.json:ro
+      - node3-data:/data
+    ports:
+      - "8548:8545"
+      - "30305:30303"
+    command:
+      - --genesis-file=/config/genesis.json
+      - --data-path=/data
+      - --node-private-key-file=/data/key
+      - --rpc-http-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,CLIQUE,MINER,ADMIN,WEB3,TXPOOL
+      - --p2p-port=30303
+      - --bootnodes=enode://${NODE1_PUBKEY}@besu-node1:30303
+      - --logging=INFO
+      - --min-gas-price=0
+      - --miner-enabled=true
+      - --miner-coinbase=0xf17f52151EbEF6C7334FAD080c5704D77216b732
+    depends_on:
+      besu-node1:
+        condition: service_healthy
+
+  besu-node4:
+    <<: *besu-base
+    container_name: poa-node4
+    volumes:
+      - ./besu/poa-config/genesis.json:/config/genesis.json:ro
+      - node4-data:/data
+    ports:
+      - "8549:8545"
+      - "30306:30303"
+    command:
+      - --genesis-file=/config/genesis.json
+      - --data-path=/data
+      - --node-private-key-file=/data/key
+      - --rpc-http-enabled=true
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --rpc-http-api=ETH,NET,CLIQUE,MINER,ADMIN,WEB3,TXPOOL
+      - --p2p-port=30303
+      - --bootnodes=enode://${NODE1_PUBKEY}@besu-node1:30303
+      - --logging=INFO
+      - --min-gas-price=0
+      - --miner-enabled=true
+      - --miner-coinbase=0xfe3b557e8fb62b89f4916b721be55ceb828dbd73
+    depends_on:
+      besu-node1:
+        condition: service_healthy
+
+networks:
+  besu-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
