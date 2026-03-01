@@ -129,7 +129,7 @@ def compile_and_deploy(w3: Web3, sol_path: str) -> str:
         "data":     "0x" + bytecode,
     }
     signed = account.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
     receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
     addr    = receipt["contractAddress"]
     print(f"[+] CBDC contract deployed at: {addr}")
@@ -160,7 +160,7 @@ def seed_accounts(w3: Web3, contract, accounts: list, amount_per: int = 10**24):
             "chainId":  chain_id,
         })
         signed  = account.sign_transaction(tx)
-        tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
+        tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
         w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
         nonce += 1
     print(f"[+] Seeded {len(accounts)} accounts")
@@ -248,7 +248,7 @@ def run_benchmark(args):
             })
             signed   = deployer.sign_transaction(tx)
             t_send   = time.time()
-            tx_hash  = w3.eth.send_raw_transaction(signed.rawTransaction)
+            tx_hash  = w3.eth.send_raw_transaction(signed.raw_transaction)
             tx_hashes.append(tx_hash)
             send_times[tx_hash.hex()] = t_send
             nonce += 1
