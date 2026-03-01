@@ -26,7 +26,11 @@ from datetime import datetime
 
 import pandas as pd
 from web3 import Web3
-from web3.middleware import geth_poa_middleware
+# web3 v6+ renamed geth_poa_middleware → ExtraDataToPOAMiddleware
+try:
+    from web3.middleware import ExtraDataToPOAMiddleware as _POAMiddleware
+except ImportError:
+    from web3.middleware import geth_poa_middleware as _POAMiddleware  # web3 v5
 
 # ── Contract ABI (matches CBDC.sol) ──────────────────────────────────────────
 CBDC_ABI = json.loads("""[
@@ -88,8 +92,12 @@ RESULTS_DIR.mkdir(exist_ok=True)
 def connect_web3(port: int, network: str) -> Web3:
     w3 = Web3(Web3.HTTPProvider(f"http://localhost:{port}",
               request_kwargs={"timeout": 60}))
-    w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-    assert w3.is_connected(), f"Cannot connect to node at port {port}"
+    try:
+        w3.middleware_onion.inject(_POAMiddleware, layer=0)
+    except Exception:
+        pass  # middleware already present or not needed
+    connected = w3.is_connected()
+    assert connected, f"Cannot connect to node at port {port}"
     print(f"[+] Connected to {network} node. Chain ID: {w3.eth.chain_id}")
     return w3
 
